@@ -6,114 +6,156 @@ import numpy as np
 from PIL import Image
 import shutil
 import re
+import io
 
-# --- CONFIGURATION ---
+# ==========================================
+# 1. ENVIRONMENT CONFIGURATION
+# ==========================================
+# Automatically detect Tesseract on Cloud (Linux) or Local (Windows)
 path = shutil.which("tesseract") 
 if path:
     pytesseract.pytesseract.tesseract_cmd = path
 else:
-    # Fallback for Windows local testing
+    # Common Windows default path
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-# --- UI SETUP ---
-st.set_page_config(page_title="Attendance Scanner", page_icon="📝")
-st.title("📝 Robust Attendance Scanner")
-st.write("Upload a sheet. I will extract: **Roll No + Name + Status**")
+# ==========================================
+# 2. CORE LOGIC: THE INTELLIGENT PARSER
+# ==========================================
+def preprocess_image(image):
+    """
+    Converts image to high-contrast black & white to remove shadows and grid lines.
+    """
+    img_array = np.array(image)
+    
+    # Convert to Grayscale
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    
+    # Adaptive Thresholding (Better for varying lighting conditions)
+    thresh = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+    )
+    
+    return thresh
 
-# --- INPUT METHOD ---
-input_method = st.radio("Choose Input:", ["Camera 📸", "Upload File 📂"], horizontal=True)
+def parse_data_smart(text):
+    """
+    Scans text line-by-line using Regex Patterns.
+    """
+    lines = text.split('\n')
+    extracted_data = []
+
+    for line in lines:
+        # A. Clean the line: Replace | _ - . with spaces
+        clean_line = re.sub(r'[^a-zA-Z0-9\s]', ' ', line)
+        clean_line = " ".join(clean_line.split()) # Remove extra spaces
+
+        # B. SKIP NOISE: If line is too short or just numbers, skip it
+        if len(clean_line) < 5 or clean_line.isdigit():
+            continue
+
+        # C. PATTERN MATCHING ENGINE
+        
+        # Pattern 1: Roll No + Name + Status (P/A)
+        # Example: "2501 Amit Sharma P"
+        match_full = re.search(r'^(\d+)\s+(.+?)\s+([PpAa])$', clean_line)
+        
+        # Pattern 2: Roll No + Name (Missing Status) -> Default to Present
+        # Example: "2502 Priya Singh" (OCR missed the 'P')
+        match_partial = re.search(r'^(\d+)\s+(.+?)$', clean_line)
+
+        roll, name, status = None, None, None
+
+        if match_full:
+            roll = match_full.group(1)
+            name = match_full.group(2).strip()
+            status = match_full.group(3).upper()
+        elif match_partial:
+            roll = match_partial.group(1)
+            name = match_partial.group(2).strip()
+            status = "P" # Default Assumption
+        
+        # D. VALIDATION GATE
+        # Only save if Name has no numbers and is reasonably long
+        if roll and name and len(name) > 2 and not any(char.isdigit() for char in name):
+            extracted_data.append({"Roll No": int(roll), "Student Name": name, "Status": status})
+
+    return extracted_data
+
+# ==========================================
+# 3. USER INTERFACE (STREAMLIT)
+# ==========================================
+st.set_page_config(page_title="Attendance Architect", page_icon="🏗️", layout="centered")
+
+st.markdown("""
+    <h1 style='text-align: center; color: #0e1117;'>Attendance Architect</h1>
+    <p style='text-align: center;'>Professional Optical Character Recognition (OCR) System</p>
+    <hr>
+""", unsafe_allow_html=True)
+
+# Input Tabs
+tab1, tab2 = st.tabs(["📸 Camera Scan", "📂 Upload File"])
 
 image = None
 
-if input_method == "Camera 📸":
-    camera_file = st.camera_input("Take a photo")
-    if camera_file:
-        image = Image.open(camera_file)
-else:
-    upload_file = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
-    if upload_file:
-        image = Image.open(upload_file)
+with tab1:
+    cam_input = st.camera_input("Capture Sheet")
+    if cam_input: image = Image.open(cam_input)
 
-# --- SMART PARSING FUNCTION (FIXED) ---
-def parse_attendance_text(text):
-    lines = text.split('\n')
-    parsed_data = []
+with tab2:
+    file_input = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
+    if file_input: image = Image.open(file_input)
 
-    for line in lines:
-        # 1. Clean the line (remove special symbols like | _ . -)
-        clean_line = re.sub(r'[^a-zA-Z0-9\s]', '', line).strip()
-        
-        # 2. Skip noise
-        if len(clean_line) < 4:
-            continue
-
-        # 3. Pattern Match: Number followed by Text
-        # Format: "2501 Aarav Sharma P"
-        match = re.match(r'(\d+)\s+([a-zA-Z\s]+)', clean_line)
-        
-        if match:
-            roll_no = match.group(1)
-            raw_text = match.group(2).strip()
-            
-            words = raw_text.split()
-            
-            # --- FIX FOR "LIST INDEX OUT OF RANGE" ---
-            if not words: 
-                continue # Skip if no words found after number
-                
-            # Logic: If last word is single letter (P/A), treat as Status
-            # Otherwise, assume Status is "P" (Present)
-            last_word = words[-1].upper()
-            
-            if len(last_word) == 1 and last_word in ['P', 'A']:
-                name = " ".join(words[:-1]) # Name is everything before last letter
-                status = last_word
-            else:
-                name = " ".join(words)      # Whole thing is name
-                status = "P"                # Default to Present if P/A missing
-            
-            # Save valid records
-            if len(name) > 2:
-                parsed_data.append([roll_no, name, status])
-    
-    return parsed_data
-
-# --- MAIN PROCESSING ---
-if image is not None:
+if image:
     st.write("---")
-    st.image(image, caption="Uploaded Image", use_container_width=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.image(image, caption="Original Source", use_container_width=True)
     
-    if st.button("Generate Excel ✅", type="primary"):
-        with st.spinner("Processing..."):
+    with col2:
+        st.info("ℹ️ **System Status:** Ready to process.\nClick button below to start extraction engine.")
+
+    if st.button("🚀 Run Extraction Engine", type="primary"):
+        with st.spinner("Processing image pixels..."):
             try:
-                # 1. Image Prep
-                img_array = np.array(image)
-                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-                # Stronger thresholding to remove shadows
-                _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
+                # 1. Preprocess
+                processed_img = preprocess_image(image)
+                
                 # 2. Extract Text
-                custom_config = r'--oem 3 --psm 6'
-                text = pytesseract.image_to_string(thresh, config=custom_config)
-
-                # 3. Parse
-                clean_data = parse_attendance_text(text)
-
-                # 4. Show Result
-                if clean_data:
-                    st.success(f"Success! Found {len(clean_data)} students.")
-                    df = pd.DataFrame(clean_data, columns=["Roll No", "Name", "Status"])
+                # psm 6 assumes a single uniform block of text
+                raw_text = pytesseract.image_to_string(processed_img, config='--oem 3 --psm 6')
+                
+                # 3. Parse Data
+                structured_data = parse_data_smart(raw_text)
+                
+                if structured_data:
+                    df = pd.DataFrame(structured_data)
                     
-                    # Editable Table
-                    edited_df = st.data_editor(df, num_rows="dynamic")
+                    # Sort by Roll No
+                    df = df.sort_values(by="Roll No")
                     
-                    # Download CSV
-                    csv = edited_df.to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 Download Excel", csv, "attendance.csv", "text/csv")
+                    st.success(f"✅ Extraction Complete! Found {len(df)} records.")
+                    
+                    # Show Editable Dataframe
+                    edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
+                    
+                    # 4. EXCEL EXPORT (The "Pro" feature)
+                    # We write to a memory buffer so we don't need to save a file on the server
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        edited_df.to_excel(writer, index=False, sheet_name='Attendance')
+                    
+                    st.download_button(
+                        label="📥 Download as Excel (.xlsx)",
+                        data=buffer.getvalue(),
+                        file_name="Attendance_Report.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
                 else:
-                    st.warning("⚠️ Could not detect valid rows. Try a clearer image.")
-                    with st.expander("Debug: See what the computer saw"):
-                        st.text(text)
-
+                    st.error("❌ No valid data pattern found.")
+                    st.warning("Diagnostic: The AI saw this text (check for garbage):")
+                    st.code(raw_text)
+                    
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"System Error: {str(e)}")
+
