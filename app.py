@@ -6,91 +6,121 @@ import io
 import re
 
 # ==========================================
-# 1. MOBILE-FIRST SETUP
+# 1. SETUP & AUTH
 # ==========================================
-st.set_page_config(page_title="AI Attendance Scan", page_icon="🤖", layout="centered")
+st.set_page_config(page_title="AI Attendance", page_icon="✅", layout="centered")
 
-# Retrieve API Key from Streamlit Secrets
+# Get API Key
 API_KEY = st.secrets.get("GEMINI_API_KEY")
-
 if not API_KEY:
-    st.error("Please add your GEMINI_API_KEY in Streamlit Secrets.")
+    st.error("❌ API Key Missing. Please add GEMINI_API_KEY to Streamlit Secrets.")
     st.stop()
 
 genai.configure(api_key=API_KEY)
 
-# FIXED: Using the standard stable model name
-try:
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
-except:
-    model = genai.GenerativeModel('gemini-pro-vision')
+# ==========================================
+# 2. AUTO-DETECT WORKING MODEL
+# ==========================================
+@st.cache_resource
+def get_working_model():
+    """
+    Asks Google: 'What models are available to me?'
+    Returns the best one that supports vision (images).
+    """
+    try:
+        # Priority list of models to try
+        priority_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro-vision', 'gemini-pro']
+        
+        # Get list of ALL available models for this key
+        available_models = [m.name for m in genai.list_models()]
+        
+        # Find the first match
+        for p_model in priority_models:
+            # Check if the priority model exists in the available list (e.g., 'models/gemini-1.5-flash')
+            for a_model in available_models:
+                if p_model in a_model:
+                    return genai.GenerativeModel(a_model)
+        
+        # If no match found, default to generic 'gemini-pro' and hope for the best
+        return genai.GenerativeModel('gemini-pro')
+        
+    except Exception as e:
+        # Fallback if list_models fails
+        return genai.GenerativeModel('gemini-pro')
+
+# Load the model once
+model = get_working_model()
 
 # ==========================================
-# 2. UI DESIGN
+# 3. APP INTERFACE
 # ==========================================
-st.title("🤖 AI Attendance Scanner")
-st.write("Snap a photo. Our AI will extract the table even with grid lines.")
+st.title("✅ AI Attendance Scanner")
+st.success(f"System Ready. Using AI Model.")
 
-cam_input = st.camera_input("Capture Sheet")
+cam_input = st.camera_input("Take Photo of Sheet")
 file_input = st.file_uploader("Or Upload Image", type=["jpg", "png", "jpeg"])
 
 image_file = cam_input if cam_input else file_input
 
 if image_file:
     img = Image.open(image_file)
-    st.image(img, caption="Ready for AI Analysis", use_container_width=True)
+    st.image(img, caption="Image Captured", use_container_width=True)
 
-    if st.button("🚀 Convert to Excel", type="primary", use_container_width=True):
-        with st.spinner("AI is reading handwriting and fixing errors..."):
+    if st.button("🚀 Process Attendance", type="primary", use_container_width=True):
+        with st.spinner("Reading document..."):
             try:
-                # Optimized prompt for your specific table format
+                # Prompt: Ask for pure CSV data
                 prompt = """
-                Extract the attendance data from this image. 
-                Identify the table rows.
-                Return ONLY a CSV-formatted list with these columns:
-                Roll No, Student Name, Status
-                Example format:
-                2501, Aarav Sharma, P
-                2502, Vivaan Singh, P
-                
-                Do not include markdown code blocks (like ```csv), headers, or extra text.
+                You are a data entry assistant.
+                Look at this attendance sheet.
+                Output the data strictly as a CSV format.
+                Columns: Roll No, Name, Status.
+                Rules:
+                1. Ignore headers like "Department", "Date", etc.
+                2. If Status is empty or missing, assume "P".
+                3. Do NOT write sentences. Only CSV data.
                 """
                 
+                # Generate
                 response = model.generate_content([prompt, img])
-                ai_text = response.text
+                text_out = response.text
                 
-                # CLEANING THE OUTPUT
-                # Remove markdown code blocks if AI included them
-                clean_csv = re.sub(r'```[a-z]*\n?', '', ai_text).strip()
+                # Cleanup: Remove Markdown (```csv ... ```)
+                clean_text = re.sub(r"```(csv)?", "", text_out).replace("```", "").strip()
                 
-                # Read into Dataframe
-                df = pd.read_csv(io.StringIO(clean_csv), names=["Roll No", "Student Name", "Status"], header=None)
-                
-                # Filter out header rows if AI accidentally included them
-                df = df[~df['Roll No'].astype(str).str.contains("Roll", case=False)]
-                
-                if not df.empty:
-                    st.success(f"Extracted {len(df)} records!")
-                    edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
+                # Convert to DataFrame
+                # We use specific separator logic to handle different AI outputs
+                try:
+                    df = pd.read_csv(io.StringIO(clean_text))
+                except:
+                    # Fallback: if comma fails, try pipe |
+                    df = pd.read_csv(io.StringIO(clean_text), sep="|")
 
-                    # Excel Export
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        edited_df.to_excel(writer, index=False)
-                    
-                    st.download_button(
-                        label="📥 Download Excel File",
-                        data=output.getvalue(),
-                        file_name="Attendance_AI.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-                else:
-                    st.error("AI could not find data. Please try a clearer photo.")
+                # Basic Cleanup of Columns
+                # Rename columns to standard names if they differ
+                df.columns = [c.strip() for c in df.columns]
+                
+                # Display
+                st.write("### Extracted Data")
+                edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
+                
+                # Download
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    edited_df.to_excel(writer, index=False)
+                
+                st.download_button(
+                    label="📥 Download Excel",
+                    data=output.getvalue(),
+                    file_name="Attendance.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
 
             except Exception as e:
-                st.error(f"Error: {e}")
-                st.info("Try refreshing the page or checking your API key.")
+                st.error(f"Processing Error: {str(e)}")
+                st.info("Tip: Ensure the photo is clear and contains text.")
+
 
 
 
