@@ -6,7 +6,8 @@ import cv2
 import numpy as np
 
 # SET TESSERACT PATH (CHANGE ONLY IF DIFFERENT)
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+import shutil
+pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract")
 
 st.set_page_config(page_title="Attendance Scanner", layout="centered")
 st.title("📸 Attendance Sheet → Excel")
@@ -68,6 +69,7 @@ if uploaded_file:
         )
     else:
         st.warning("No valid attendance rows detected. Try a clearer image.")
+
 
 
 
