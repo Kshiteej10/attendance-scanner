@@ -1,10 +1,9 @@
 streamlit
-pytesseract
+google-generativeai
 pandas
-opencv-python-headless
-numpy
 pillow
 openpyxl
+
 
 
 
