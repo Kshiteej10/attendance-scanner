@@ -4,7 +4,7 @@ pandas
 opencv-python-headless
 numpy
 pillow
-openpyxl
-google-generativeai
+
+
 
 
