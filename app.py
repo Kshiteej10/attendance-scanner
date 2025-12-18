@@ -1,74 +1,160 @@
 import streamlit as st
 import pytesseract
-from PIL import Image
 import pandas as pd
 import cv2
 import numpy as np
-
-# SET TESSERACT PATH (CHANGE ONLY IF DIFFERENT)
+from PIL import Image
 import shutil
-pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract")
+import re
+import io
 
-st.set_page_config(page_title="Attendance Scanner", layout="centered")
-st.title("📸 Attendance Sheet → Excel")
-st.write("Upload a photo of paper attendance sheet")
+# ==========================================
+# 1. PAGE CONFIGURATION (Mobile Friendly)
+# ==========================================
+st.set_page_config(page_title="Attendance Pro", page_icon="📱", layout="wide")
 
-uploaded_file = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
+# ==========================================
+# 2. TESSERACT SETUP (Cloud & Local Support)
+# ==========================================
+path = shutil.which("tesseract") 
+if path:
+    pytesseract.pytesseract.tesseract_cmd = path
+else:
+    # Fallback for Windows Local (Update path if needed)
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-if uploaded_file:
-    image = Image.open(uploaded_file)
-    img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-    h, w = img_cv.shape[:2]
-
-    # 🔹 CROP ONLY TABLE AREA (IMPORTANT)
-    crop = img_cv[int(h*0.25):int(h*0.95), int(w*0.05):int(w*0.95)]
-
-    st.image(crop, caption="Detected Table Area", use_column_width=True)
-
-    # 🔹 PREPROCESS IMAGE
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
-
+# ==========================================
+# 3. SMART PROCESSING LOGIC
+# ==========================================
+def preprocess_image(image):
+    """
+    Cleans the image to make text sharp and removes shadows.
+    """
+    img_array = np.array(image)
+    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    
+    # Adaptive Thresholding: Best for phone camera photos with uneven lighting
     thresh = cv2.adaptiveThreshold(
-        blur, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        15, 3
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
     )
+    return thresh
 
-    # 🔹 OCR CONFIG (TABLE FRIENDLY)
-    custom_config = r'--oem 3 --psm 4 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789PA'
+def parse_data(text):
+    """
+    Extracts: Roll No | Name | Status
+    """
+    lines = text.split('\n')
+    data = []
 
-    text = pytesseract.image_to_string(thresh, config=custom_config)
+    for line in lines:
+        # A. Clean: Replace grid lines (| _ - .) with empty space
+        clean_line = re.sub(r'[^a-zA-Z0-9\s]', ' ', line)
+        
+        # Remove extra spaces between words
+        clean_line = " ".join(clean_line.split())
 
-    st.subheader("🔍 Raw OCR Output")
-    st.text(text)
+        # B. Skip Noise: If line is too short or just numbers
+        if len(clean_line) < 5 or clean_line.isdigit():
+            continue
 
-    # 🔹 PARSE ROWS
-    rows = []
-    for line in text.split("\n"):
-        parts = line.split()
-        if len(parts) >= 3 and parts[0].isdigit():
-            roll = parts[0]
-            status = parts[-1]
-            name = " ".join(parts[1:-1])
-            rows.append([roll, name, status])
+        # C. PATTERN MATCHING
+        # Pattern 1: Number ... Name ... P/A (Standard)
+        match_full = re.search(r'^(\d+)\s+(.+?)\s+([PpAa])$', clean_line)
+        
+        # Pattern 2: Number ... Name (Missing Status -> Assume Present)
+        match_partial = re.search(r'^(\d+)\s+(.+?)$', clean_line)
 
-    if rows:
-        df = pd.DataFrame(rows, columns=["Roll No", "Student Name", "Status (P/A)"])
+        roll, name, status = None, None, None
 
-        st.subheader("✅ Extracted Attendance (Editable)")
-        edited_df = st.data_editor(df, use_container_width=True)
+        if match_full:
+            roll = match_full.group(1)
+            name = match_full.group(2).strip()
+            status = match_full.group(3).upper()
+        elif match_partial:
+            roll = match_partial.group(1)
+            name = match_partial.group(2).strip()
+            status = "P" # Auto-fill Present
+        
+        # D. FILTERING (Avoid "1", "2", "Total" etc.)
+        if roll and name:
+            # Name must be text, Roll must be > 0
+            if len(name) > 2 and not any(char.isdigit() for char in name):
+                data.append({"Roll No": int(roll), "Student Name": name, "Status": status})
 
-        st.download_button(
-            "⬇️ Download Excel",
-            edited_df.to_csv(index=False).encode("utf-8"),
-            "attendance.csv",
-            "text/csv"
-        )
-    else:
-        st.warning("No valid attendance rows detected. Try a clearer image.")
+    return data
+
+# ==========================================
+# 4. APP INTERFACE
+# ==========================================
+st.title("📱 Attendance Scanner")
+st.write("Snap a photo of the list. I'll make the Excel file.")
+
+# TAB 1: CAMERA (Default for Mobile)
+cam_input = st.camera_input("Take Photo", label_visibility="visible")
+
+# TAB 2: UPLOAD (Fallback)
+file_input = None
+with st.expander("Or Upload an Image File"):
+    file_input = st.file_uploader("Upload", type=["jpg", "png", "jpeg"])
+
+# SELECT IMAGE SOURCE
+image = None
+if cam_input:
+    image = Image.open(cam_input)
+elif file_input:
+    image = Image.open(file_input)
+
+# PROCESS BUTTON
+if image:
+    st.write("---")
+    st.image(image, caption="Review Image", use_container_width=True)
+    
+    # Big Button for Mobile
+    if st.button("Generate Excel ✅", type="primary", use_container_width=True):
+        with st.spinner("⏳ Reading handwriting..."):
+            try:
+                # 1. Pre-process
+                processed_img = preprocess_image(image)
+                
+                # 2. OCR Read
+                # --psm 6 assumes a single uniform block of text
+                raw_text = pytesseract.image_to_string(processed_img, config='--oem 3 --psm 6')
+                
+                # 3. Smart Parse
+                structured_data = parse_data(raw_text)
+                
+                if structured_data:
+                    # Create DataFrame
+                    df = pd.DataFrame(structured_data)
+                    df = df.sort_values(by="Roll No") # Sort by Roll Number
+                    
+                    st.success(f"🎉 Success! Found {len(df)} students.")
+                    
+                    # Show Data
+                    st.dataframe(df, use_container_width=True)
+                    
+                    # 4. GENERATE EXCEL FILE
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        df.to_excel(writer, index=False, sheet_name='Attendance')
+                    
+                    # Download Button
+                    st.download_button(
+                        label="📥 Download Excel (.xlsx)",
+                        data=buffer.getvalue(),
+                        file_name="Attendance_Sheet.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                else:
+                    st.error("❌ No valid names found.")
+                    st.info("Try holding the camera closer and steady.")
+                    with st.expander("Debug Raw Text"):
+                        st.text(raw_text)
+                        
+            except Exception as e:
+                st.error(f"Error: {e}")
+
 
 
 
