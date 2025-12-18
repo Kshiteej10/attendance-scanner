@@ -6,51 +6,49 @@ import io
 import re
 
 # ==========================================
-# 1. SETUP
+# 1. SETUP & AUTH
 # ==========================================
 st.set_page_config(page_title="Attendance AI", page_icon="⚡", layout="centered")
 
 API_KEY = st.secrets.get("GEMINI_API_KEY")
 if not API_KEY:
-    st.error("❌ API Key Not Found. Please add it to Secrets.")
+    st.error("❌ API Key Not Found. Please add it to Streamlit Secrets.")
     st.stop()
 
 genai.configure(api_key=API_KEY)
 
 # ==========================================
-# 2. FORCE SPECIFIC FREE MODELS
+# 2. MODEL SELECTOR (THE FIX)
 # ==========================================
-def get_model():
-    # We explicitly try the FREE models in order.
-    # We do NOT ask the server for a list (to avoid picking restricted models).
-    models_to_try = [
-        'gemini-1.5-flash',          # Best & Free
-        'gemini-1.5-flash-latest',   # Alternate name
-        'gemini-pro-vision',         # Old Reliable
-        'models/gemini-1.5-flash'    # Full path fallback
-    ]
-    
-    for model_name in models_to_try:
-        try:
-            # Try to initialize
-            model = genai.GenerativeModel(model_name)
-            # Dry run to see if it exists (doesn't consume quota)
-            return model
-        except:
-            continue
-            
-    # Final fallback
-    return genai.GenerativeModel('gemini-pro')
+st.title("⚡ Universal Attendance Scanner")
+st.write("Snap a photo to extract Excel data.")
 
-model = get_model()
+# Fetch available models dynamically
+try:
+    model_list = []
+    for m in genai.list_models():
+        # Only show models that support text/image generation
+        if 'generateContent' in m.supported_generation_methods:
+            model_list.append(m.name)
+    
+    # Sort so the best ones are at the top
+    model_list.sort(key=lambda x: 'flash' not in x) # Puts 'flash' models first
+    
+    if not model_list:
+        st.error("❌ No models found for this API Key. Check your Google AI Studio account.")
+        st.stop()
+        
+    # User selects the model (No more guessing!)
+    selected_model = st.selectbox("🤖 Select AI Model (Try the first one)", model_list)
+    model = genai.GenerativeModel(selected_model)
+
+except Exception as e:
+    st.error(f"Error fetching models: {e}")
+    st.stop()
 
 # ==========================================
 # 3. APP INTERFACE
 # ==========================================
-st.title("⚡ Attendance Scanner")
-st.write("Using AI Model: " + str(model.model_name).replace("models/", ""))
-
-# Camera & Upload
 cam_input = st.camera_input("Take Photo")
 file_input = st.file_uploader("Or Upload", type=["jpg", "png", "jpeg"])
 
@@ -61,19 +59,16 @@ if image_file:
     st.image(img, caption="Captured", use_container_width=True)
 
     if st.button("🚀 Process Attendance", type="primary", use_container_width=True):
-        with st.spinner("AI is processing (this is free)..."):
+        with st.spinner(f"Processing with {selected_model}..."):
             try:
-                # Prompt optimized for Gemini Flash
+                # Prompt
                 prompt = """
-                You are a data entry machine. 
-                Look at this attendance sheet. 
-                Output ONLY a CSV table with 3 columns: Roll No, Name, Status.
-                
+                Extract attendance data as a clean CSV.
+                Columns: Roll No, Name, Status.
                 Rules:
-                1. If Status is marked "P" or present, write "P".
-                2. If Status is marked "A" or absent, write "A".
-                3. If Status is blank, write "P".
-                4. Do NOT use markdown. Do NOT write sentences.
+                1. If Status is empty, assume "P".
+                2. Ignore headers/footers.
+                3. Return ONLY CSV data.
                 """
                 
                 response = model.generate_content([prompt, img])
@@ -82,17 +77,16 @@ if image_file:
                 # Clean Markdown
                 clean_text = re.sub(r"```(csv)?", "", text).replace("```", "").strip()
                 
-                # Parse
+                # Parse to DataFrame
                 try:
                     df = pd.read_csv(io.StringIO(clean_text))
                 except:
                     df = pd.read_csv(io.StringIO(clean_text), sep="|")
 
-                # Show
-                st.success(f"Found {len(df)} students")
+                # Show & Download
+                st.success(f"Success! Found {len(df)} rows.")
                 edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
                 
-                # Download
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     edited_df.to_excel(writer, index=False)
@@ -106,8 +100,10 @@ if image_file:
                 )
 
             except Exception as e:
-                st.error("Processing Error. Please try again.")
+                st.error("Processing Error.")
                 st.info(f"Details: {e}")
+                st.warning("⚠️ If this fails, try selecting a different model from the dropdown above!")
+
 
 
 
